@@ -251,7 +251,7 @@ def run_screener(raw, symbols, tickers, progress_callback=None):
 )
             vol_ok  = avg_vol is not None and avg_vol >= config.MIN_AVG_VOLUME
 
-            high_52w, pct_from_high = calc_52w_metrics(closes)
+            high_52w, pct_from_high = calc_52week_metrics(closes)
             high_ok = pct_from_high is not None and pct_from_high <= config.NEAR_HIGH_PERCENT
 
             all_pass = ema_ok and rsi_ok and vol_ok and high_ok
