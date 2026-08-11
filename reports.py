@@ -433,5 +433,5 @@ def build_excel(
         )
 
     output.seek(0)
-
+    
     return output.read()
