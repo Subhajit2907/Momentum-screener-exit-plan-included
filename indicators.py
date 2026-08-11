@@ -26,6 +26,35 @@ def calc_ema(prices: List[float], period: int) -> Optional[float]:
     return round(ema, 2)
 
 
+def calc_ema_series(prices, period):
+    """
+    Calculate the EMA value for every price in the series.
+
+    Returns a list with the same length as prices.
+    Values before the first valid EMA are None.
+    """
+
+    if len(prices) < period:
+        return [None] * len(prices)
+
+    result = [None] * len(prices)
+
+    multiplier = 2 / (period + 1)
+
+    ema = sum(prices[:period]) / period
+
+    result[period - 1] = ema
+
+    for i in range(period, len(prices)):
+        ema = (
+            prices[i] * multiplier
+            + ema * (1 - multiplier)
+        )
+
+        result[i] = ema
+
+    return result
+
 def calc_rsi(prices: List[float], period: int = 14) -> Optional[float]:
     """
     Calculate RSI using Wilder's smoothing.

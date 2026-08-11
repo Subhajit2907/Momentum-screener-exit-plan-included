@@ -13,6 +13,7 @@ import config
 
 from indicators import (
     calc_ema,
+    calc_ema_series,
     calc_rsi,
     calc_average_volume,
     calc_52week_metrics,
@@ -52,6 +53,69 @@ def extract_series(raw, ticker, field, tickers):
         if field in raw.columns:
             series = raw[field].dropna()
     return series.values.tolist() if series is not None else []
+
+def extract_series_with_dates(raw, ticker, field, tickers):
+    """
+    Extract a yfinance series while preserving its dates.
+
+    Returns:
+        pandas.Series
+    """
+
+    series = None
+
+    if len(tickers) > 1:
+
+        if isinstance(raw.columns, pd.MultiIndex):
+
+            if (field, ticker) in raw.columns:
+                series = raw[(field, ticker)]
+
+            elif (ticker, field) in raw.columns:
+                series = raw[(ticker, field)]
+
+            else:
+                try:
+                    series = raw.xs(
+                        ticker,
+                        axis=1,
+                        level=1,
+                    )[field]
+
+                except Exception:
+
+                    try:
+                        series = raw.xs(
+                            ticker,
+                            axis=1,
+                            level=0,
+                        )[field]
+
+                    except Exception:
+                        pass
+
+        else:
+
+            if ticker in raw.columns:
+                series = raw[ticker]
+
+            elif field in raw.columns:
+                series = raw[field]
+
+    else:
+
+        if field in raw.columns:
+            series = raw[field]
+
+    if series is None:
+        return pd.Series(dtype=float)
+
+    series = pd.to_numeric(
+        series,
+        errors="coerce",
+    ).dropna()
+
+    return series
 
 
 # ── Load symbols from uploaded CSV bytes ───────────────────
@@ -108,92 +172,635 @@ def load_holdings_from_bytes(file_bytes):
 
 def check_exit_signals(holdings, progress_callback=None):
     """
-    For each holding, fetch weekly OHLC and check if current price
-    is below weekly 50 EMA.
-    Returns list of dicts with exit signal status for each holding.
+    Phase 2A portfolio exit engine.
+
+    Signals are based on:
+
+    1. Weekly 20 EMA
+    2. Weekly 50 EMA
+    3. Weekly RSI(14)
+    4. Consecutive weekly closes below W50
+    5. Drawdown from peak since entry
+    6. Exit Score out of 100
+
+    The weekly 50 EMA remains the primary trend signal.
     """
+
     if not holdings:
         return []
 
-    symbols = [h["symbol"] for h in holdings]
-    tickers = [s + ".NS" for s in symbols]
+    symbols = [
+        h["symbol"]
+        for h in holdings
+    ]
+
+    tickers = [
+        s + config.MARKET_SUFFIX
+        for s in symbols
+    ]
 
     if progress_callback:
-        progress_callback(f"Checking exit signals for {len(symbols)} holdings (weekly data)…")
+        progress_callback(
+            f"Checking portfolio exit signals for "
+            f"{len(symbols)} holdings (weekly data)…"
+        )
+
+    # ----------------------------------------------------------
+    # Download 5 years of weekly data
+    # ----------------------------------------------------------
 
     try:
+
         raw = yf.download(
             tickers,
-            period="2y",        # 2 years for reliable weekly 50 EMA (needs 50 weeks)
+            period="5y",
             interval="1wk",
             group_by="ticker",
-            auto_adjust=True,
+            auto_adjust=config.AUTO_ADJUST,
             progress=False,
-            threads=True,
+            threads=config.YFINANCE_THREADS,
         )
+
     except Exception as e:
-        return [{"symbol": h["symbol"], "error": str(e)} for h in holdings]
+
+        return [
+            {
+                "Symbol": h["symbol"],
+                "Signal": "✗ Data error",
+                "Action": "Check manually",
+                "Error": str(e)[:80],
+            }
+            for h in holdings
+        ]
 
     results = []
-    for holding in holdings:
-        symbol = holding["symbol"]
-        ticker = symbol + ".NS"
-        try:
-            closes = extract_series(raw, ticker, "Close", tickers)
 
-            if not closes or len(closes) < 50:
+    for holding in holdings:
+
+        symbol = holding["symbol"]
+        ticker = symbol + config.MARKET_SUFFIX
+
+        try:
+
+            # --------------------------------------------------
+            # Get weekly close series WITH dates
+            # --------------------------------------------------
+
+            close_series = extract_series_with_dates(
+                raw,
+                ticker,
+                "Close",
+                tickers,
+            )
+
+            if close_series.empty:
                 results.append({
-                    "Symbol":       symbol,
-                    "Entry Date":   holding["entry_date"],
-                    "Entry Price":  holding["entry_price"],
+                    "Symbol": symbol,
+                    "Entry Date": holding["entry_date"],
+                    "Entry Price": holding["entry_price"],
                     "Current Price": "—",
+                    "Weekly 20 EMA": "—",
                     "Weekly 50 EMA": "—",
-                    "Signal":       "⚠ Insufficient data",
-                    "P&L %":        "—",
-                    "Action":       "Check manually",
+                    "vs W50 EMA": "—",
+                    "Weekly RSI": "—",
+                    "W50 Below Weeks": "—",
+                    "Peak Drawdown": "—",
+                    "Exit Score": "—",
+                    "P&L %": "—",
+                    "Signal": "⚠ Insufficient data",
+                    "Action": "Check manually",
                 })
                 continue
 
-            current     = float(closes[-1])
-            weekly_ema50 = calc_ema(closes, 50)
-            exit_signal  = current < weekly_ema50
+            # --------------------------------------------------
+            # Need at least 50 weeks for W50
+            # --------------------------------------------------
 
-            # P&L if entry price available
-            pnl_str = "—"
-            if holding["entry_price"]:
-                pnl = (current - holding["entry_price"]) / holding["entry_price"] * 100
-                pnl_str = f"{'+' if pnl >= 0 else ''}{pnl:.1f}%"
+            if len(close_series) < config.PORTFOLIO_WEEKLY_SLOW_EMA:
 
-            buffer = ((current - weekly_ema50) / weekly_ema50) * 100
+                results.append({
+                    "Symbol": symbol,
+                    "Entry Date": holding["entry_date"],
+                    "Entry Price": holding["entry_price"],
+                    "Current Price": "—",
+                    "Weekly 20 EMA": "—",
+                    "Weekly 50 EMA": "—",
+                    "vs W50 EMA": "—",
+                    "Weekly RSI": "—",
+                    "W50 Below Weeks": "—",
+                    "Peak Drawdown": "—",
+                    "Exit Score": "—",
+                    "P&L %": "—",
+                    "Signal": "⚠ Insufficient data",
+                    "Action": "Check manually",
+                })
+                continue
+
+            closes = (
+                close_series
+                .astype(float)
+                .tolist()
+            )
+
+            # --------------------------------------------------
+            # Current price
+            # --------------------------------------------------
+
+            current = float(closes[-1])
+
+            # --------------------------------------------------
+            # Weekly EMA series
+            # --------------------------------------------------
+
+            ema20_series = calc_ema_series(
+                closes,
+                config.PORTFOLIO_WEEKLY_FAST_EMA,
+            )
+
+            ema50_series = calc_ema_series(
+                closes,
+                config.PORTFOLIO_WEEKLY_SLOW_EMA,
+            )
+
+            weekly_ema20 = ema20_series[-1]
+            weekly_ema50 = ema50_series[-1]
+
+            # --------------------------------------------------
+            # Weekly RSI
+            # --------------------------------------------------
+
+            weekly_rsi = calc_rsi(
+                closes,
+                config.PORTFOLIO_WEEKLY_RSI_PERIOD,
+            )
+
+            # --------------------------------------------------
+            # Distance from W50
+            # --------------------------------------------------
+
+            w50_buffer = (
+                (current - weekly_ema50)
+                / weekly_ema50
+                * 100
+            )
+
+            # --------------------------------------------------
+            # Consecutive weekly closes below THEIR W50
+            #
+            # This is important:
+            # We compare each historical close against
+            # that week's actual W50, not today's W50.
+            # --------------------------------------------------
+
+            below_w50_count = 0
+
+            for i in range(
+                len(closes) - 1,
+                -1,
+                -1,
+            ):
+
+                ema50 = ema50_series[i]
+
+                if ema50 is None:
+                    break
+
+                if closes[i] < ema50:
+                    below_w50_count += 1
+                else:
+                    break
+
+            # --------------------------------------------------
+            # Parse entry date
+            # --------------------------------------------------
+
+            entry_date_raw = holding.get(
+                "entry_date",
+                "—",
+            )
+
+            entry_date = None
+
+            if entry_date_raw not in (
+                None,
+                "",
+                "—",
+                "nan",
+            ):
+
+                try:
+
+                    entry_date = pd.to_datetime(
+                        entry_date_raw,
+                        dayfirst=True,
+                        errors="coerce",
+                    )
+
+                except Exception:
+
+                    entry_date = None
+
+            # --------------------------------------------------
+            # Peak since entry
+            # --------------------------------------------------
+
+            if entry_date is not None and not pd.isna(entry_date):
+
+                entry_mask = (
+                    close_series.index
+                    >= entry_date
+                )
+
+                post_entry = close_series.loc[
+                    entry_mask
+                ]
+
+            else:
+
+                # If Entry Date is unavailable,
+                # use the complete available history.
+                post_entry = close_series
+
+            if post_entry.empty:
+
+                post_entry = close_series
+
+            peak_close = float(
+                post_entry.max()
+            )
+
+            peak_drawdown = (
+                (peak_close - current)
+                / peak_close
+                * 100
+            )
+
+            peak_drawdown = max(
+                0.0,
+                peak_drawdown,
+            )
+
+            # --------------------------------------------------
+            # P&L
+            # --------------------------------------------------
+
+            entry_price = holding.get(
+                "entry_price"
+            )
+
+            pnl = None
+
+            if entry_price is not None:
+
+                pnl = (
+                    (current - entry_price)
+                    / entry_price
+                    * 100
+                )
+
+            # ==================================================
+            # EXIT SCORE
+            # ==================================================
+
+            score = 0
+
+            # --------------------------------------------------
+            # 1. TREND — 40 points
+            # --------------------------------------------------
+
+            trend_score = 0
+
+            if current > weekly_ema20:
+                trend_score += 10
+
+            if current > weekly_ema50:
+                trend_score += 15
+
+            if weekly_ema20 > weekly_ema50:
+                trend_score += 15
+
+            score += trend_score
+
+            # --------------------------------------------------
+            # 2. MOMENTUM — 20 points
+            # --------------------------------------------------
+
+            momentum_score = 0
+
+            if weekly_rsi is not None:
+
+                if (
+                    weekly_rsi
+                    >= config.PORTFOLIO_RSI_HEALTHY
+                ):
+                    momentum_score = 20
+
+                elif (
+                    weekly_rsi
+                    >= config.PORTFOLIO_RSI_WARNING
+                ):
+                    momentum_score = 15
+
+                elif (
+                    weekly_rsi
+                    >= config.PORTFOLIO_RSI_SEVERE
+                ):
+                    momentum_score = 8
+
+                else:
+                    momentum_score = 0
+
+            score += momentum_score
+
+            # --------------------------------------------------
+            # 3. DRAWDOWN — 20 points
+            # --------------------------------------------------
+
+            if peak_drawdown < 5:
+
+                drawdown_score = 20
+
+            elif (
+                peak_drawdown
+                < config.PORTFOLIO_DD_WARNING
+            ):
+
+                drawdown_score = 15
+
+            elif (
+                peak_drawdown
+                < config.PORTFOLIO_DD_REDUCE
+            ):
+
+                drawdown_score = 8
+
+            else:
+
+                drawdown_score = 0
+
+            score += drawdown_score
+
+            # --------------------------------------------------
+            # 4. W50 CONFIRMATION — 20 points
+            # --------------------------------------------------
+
+            if below_w50_count == 0:
+
+                confirmation_score = 20
+
+            elif below_w50_count == 1:
+
+                confirmation_score = 10
+
+            else:
+
+                confirmation_score = 0
+
+            score += confirmation_score
+
+            score = int(score)
+
+            # ==================================================
+            # SIGNAL
+            # ==================================================
+
+            # Hard exit:
+            # 2+ consecutive weekly closes below W50
+            # AND weekly RSI below 45.
+            #
+            # This overrides the score.
+            # ==================================================
+
+            if (
+                below_w50_count
+                >= config.PORTFOLIO_EXIT_CONFIRMATION_WEEKS
+                and weekly_rsi is not None
+                and weekly_rsi
+                < config.PORTFOLIO_RSI_SEVERE
+            ):
+
+                signal = "🔴 EXIT"
+
+                action = (
+                    "Exit — confirmed weekly trend "
+                    "breakdown"
+                )
+
+            elif (
+                score
+                >= config.PORTFOLIO_STRONG_HOLD_SCORE
+            ):
+
+                signal = "🟢 STRONG HOLD"
+
+                action = (
+                    "Trend healthy — continue holding"
+                )
+
+            elif (
+                score
+                >= config.PORTFOLIO_HOLD_SCORE
+            ):
+
+                signal = "🟢 HOLD"
+
+                action = "Hold position"
+
+            elif (
+                score
+                >= config.PORTFOLIO_WATCH_SCORE
+            ):
+
+                signal = "🟡 WATCH"
+
+                action = (
+                    "Momentum weakening — "
+                    "review next cycle"
+                )
+
+            elif (
+                score
+                >= config.PORTFOLIO_REDUCE_SCORE
+            ):
+
+                signal = "🟠 REDUCE"
+
+                action = (
+                    "Multiple warning signs — "
+                    "consider reducing position"
+                )
+
+            else:
+
+                signal = "🔴 EXIT"
+
+                action = (
+                    "Trend and momentum "
+                    "significantly weakened"
+                )
+
+            # --------------------------------------------------
+            # First W50 break warning
+            # --------------------------------------------------
+
+            if (
+                below_w50_count == 1
+                and "EXIT" not in signal
+            ):
+
+                action = (
+                    "First weekly close below W50 — "
+                    "monitor for confirmation"
+                )
+
+            # --------------------------------------------------
+            # Formatting
+            # --------------------------------------------------
+
+            if pnl is None:
+
+                pnl_str = "—"
+
+            else:
+
+                pnl_str = (
+                    f"{'+' if pnl >= 0 else ''}"
+                    f"{pnl:.1f}%"
+                )
+
+            w50_str = (
+                f"{'+' if w50_buffer >= 0 else ''}"
+                f"{w50_buffer:.1f}%"
+            )
 
             results.append({
-                "Symbol":         symbol,
-                "Entry Date":     holding["entry_date"],
-                "Entry Price":    f"₹{holding['entry_price']:,.2f}" if holding["entry_price"] else "—",
-                "Current Price":  round(current, 2),
-                "Weekly 50 EMA": round(weekly_ema50, 2),
-                "vs W50 EMA":    f"{'+' if buffer >= 0 else ''}{buffer:.1f}%",
-                "P&L %":         pnl_str,
-                "Signal":        "🚨 EXIT" if exit_signal else "✅ HOLD",
-                "Action":        "Consider exiting — price below weekly 50 EMA" if exit_signal else "Hold position",
+
+                "Symbol": symbol,
+
+                "Entry Date":
+                    entry_date_raw,
+
+                "Entry Price":
+                    (
+                        f"₹{entry_price:,.2f}"
+                        if entry_price is not None
+                        else "—"
+                    ),
+
+                "Current Price":
+                    round(current, 2),
+
+                "Weekly 20 EMA":
+                    round(weekly_ema20, 2),
+
+                "Weekly 50 EMA":
+                    round(weekly_ema50, 2),
+
+                "vs W50 EMA":
+                    w50_str,
+
+                "Weekly RSI":
+                    (
+                        round(
+                            weekly_rsi,
+                            1,
+                        )
+                        if weekly_rsi is not None
+                        else "—"
+                    ),
+
+                "W50 Below Weeks":
+                    below_w50_count,
+
+                "Peak Drawdown":
+                    f"-{peak_drawdown:.1f}%",
+
+                "Exit Score":
+                    score,
+
+                "P&L %":
+                    pnl_str,
+
+                "Signal":
+                    signal,
+
+                "Action":
+                    action,
             })
 
         except Exception as e:
+
             results.append({
-                "Symbol":       symbol,
-                "Entry Date":   holding["entry_date"],
-                "Entry Price":  holding["entry_price"],
-                "Current Price": "—",
-                "Weekly 50 EMA": "—",
-                "Signal":       f"✗ Error: {str(e)[:50]}",
-                "P&L %":        "—",
-                "Action":       "Check manually",
+
+                "Symbol":
+                    symbol,
+
+                "Entry Date":
+                    holding.get(
+                        "entry_date",
+                        "—",
+                    ),
+
+                "Entry Price":
+                    holding.get(
+                        "entry_price",
+                        None,
+                    ),
+
+                "Current Price":
+                    "—",
+
+                "Weekly 20 EMA":
+                    "—",
+
+                "Weekly 50 EMA":
+                    "—",
+
+                "vs W50 EMA":
+                    "—",
+
+                "Weekly RSI":
+                    "—",
+
+                "W50 Below Weeks":
+                    "—",
+
+                "Peak Drawdown":
+                    "—",
+
+                "Exit Score":
+                    "—",
+
+                "P&L %":
+                    "—",
+
+                "Signal":
+                    f"✗ Error: {str(e)[:60]}",
+
+                "Action":
+                    "Check manually",
             })
 
-    # Sort — exits first, then holds
-    results.sort(key=lambda x: 0 if "EXIT" in str(x.get("Signal","")) else 1)
-    return results
+    # ----------------------------------------------------------
+    # Sort by severity
+    # ----------------------------------------------------------
 
+    priority = {
+        "🔴 EXIT": 0,
+        "🟠 REDUCE": 1,
+        "🟡 WATCH": 2,
+        "🟢 HOLD": 3,
+        "🟢 STRONG HOLD": 4,
+    }
+
+    results.sort(
+        key=lambda x: priority.get(
+            x.get("Signal", ""),
+            99,
+        )
+    )
+
+    return results
 
 # ── Download ───────────────────────────────────────────────
 
