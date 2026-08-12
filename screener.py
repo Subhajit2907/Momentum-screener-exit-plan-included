@@ -470,14 +470,38 @@ def check_exit_signals(holdings, progress_callback=None):
 
             trend_score = 0
 
+            # Price above weekly 20 EMA
             if current > weekly_ema20:
-                trend_score += 10
+                         trend_score += 7
 
+            # Price above weekly 50 EMA
             if current > weekly_ema50:
-                trend_score += 15
+                         trend_score += 8
 
+            # Weekly 20 EMA above weekly 50 EMA
             if weekly_ema20 > weekly_ema50:
-                trend_score += 15
+                         trend_score += 5
+
+            # Strength of the price's position above W50
+            #
+            # This prevents a stock that is only slightly above
+            # W50 from receiving the same trend score as a stock
+            # that is substantially above W50.
+
+            if w50_buffer >= 20:
+                        trend_score += 20
+
+            elif w50_buffer >= 15:
+                        trend_score += 14
+
+            elif w50_buffer >= 10:
+                        trend_score += 8
+
+            elif w50_buffer >= 5:
+                        trend_score += 4
+
+            elif w50_buffer >= 0:
+                        trend_score += 2
 
             score += trend_score
 
