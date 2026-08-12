@@ -457,6 +457,28 @@ def check_exit_signals(holdings, progress_callback=None):
                     / entry_price
                     * 100
                 )
+            # --------------------------------------------------
+            # Position P&L — 10 points
+            # --------------------------------------------------
+
+            pnl_score = 0
+
+            if pnl is not None:
+
+                if pnl >= 10:
+                    pnl_score = 10
+
+                elif pnl >= 0:
+                    pnl_score = 7
+
+                elif pnl >= -5:
+                    pnl_score = 4
+
+                elif pnl >= -10:
+                    pnl_score = 1
+
+                else:
+                    pnl_score = 0
 
             # ==================================================
             # EXIT SCORE
@@ -465,43 +487,38 @@ def check_exit_signals(holdings, progress_callback=None):
             score = 0
 
             # --------------------------------------------------
-            # 1. TREND — 40 points
+            # 1. TREND — 35 points
             # --------------------------------------------------
 
             trend_score = 0
 
             # Price above weekly 20 EMA
             if current > weekly_ema20:
-                         trend_score += 7
+                trend_score += 7
 
             # Price above weekly 50 EMA
             if current > weekly_ema50:
-                         trend_score += 8
+                trend_score += 8
 
             # Weekly 20 EMA above weekly 50 EMA
             if weekly_ema20 > weekly_ema50:
-                         trend_score += 5
+                trend_score += 5
 
-            # Strength of the price's position above W50
-            #
-            # This prevents a stock that is only slightly above
-            # W50 from receiving the same trend score as a stock
-            # that is substantially above W50.
-
+            # Strength of price position above W50
             if w50_buffer >= 20:
-                        trend_score += 20
+                trend_score += 15
 
             elif w50_buffer >= 15:
-                        trend_score += 14
+                trend_score += 10
 
             elif w50_buffer >= 10:
-                        trend_score += 8
+                trend_score += 6
 
             elif w50_buffer >= 5:
-                        trend_score += 4
+                trend_score += 3
 
             elif w50_buffer >= 0:
-                        trend_score += 2
+                trend_score += 1
 
             score += trend_score
 
@@ -513,22 +530,13 @@ def check_exit_signals(holdings, progress_callback=None):
 
             if weekly_rsi is not None:
 
-                if (
-                    weekly_rsi
-                    >= config.PORTFOLIO_RSI_HEALTHY
-                ):
+                if weekly_rsi >= config.PORTFOLIO_RSI_HEALTHY:
                     momentum_score = 20
 
-                elif (
-                    weekly_rsi
-                    >= config.PORTFOLIO_RSI_WARNING
-                ):
+                elif weekly_rsi >= config.PORTFOLIO_RSI_WARNING:
                     momentum_score = 15
 
-                elif (
-                    weekly_rsi
-                    >= config.PORTFOLIO_RSI_SEVERE
-                ):
+                elif weekly_rsi >= config.PORTFOLIO_RSI_SEVERE:
                     momentum_score = 8
 
                 else:
@@ -537,51 +545,64 @@ def check_exit_signals(holdings, progress_callback=None):
             score += momentum_score
 
             # --------------------------------------------------
-            # 3. DRAWDOWN — 20 points
+            # 3. DRAWDOWN — 15 points
             # --------------------------------------------------
 
             if peak_drawdown < 5:
-
-                drawdown_score = 20
-
-            elif (
-                peak_drawdown
-                < config.PORTFOLIO_DD_WARNING
-            ):
-
                 drawdown_score = 15
 
-            elif (
-                peak_drawdown
-                < config.PORTFOLIO_DD_REDUCE
-            ):
+            elif peak_drawdown < config.PORTFOLIO_DD_WARNING:
+                drawdown_score = 11
 
-                drawdown_score = 8
+            elif peak_drawdown < config.PORTFOLIO_DD_REDUCE:
+                drawdown_score = 6
 
             else:
-
                 drawdown_score = 0
 
             score += drawdown_score
 
             # --------------------------------------------------
-            # 4. W50 CONFIRMATION — 20 points
+            # 4. POSITION P&L — 10 points
+            # --------------------------------------------------
+
+            pnl_score = 0
+
+            if pnl is not None:
+
+                if pnl >= 10:
+                    pnl_score = 10
+
+                elif pnl >= 0:
+                    pnl_score = 7
+
+                elif pnl >= -5:
+                    pnl_score = 4
+
+                elif pnl >= -10:
+                    pnl_score = 1
+
+                else:
+                    pnl_score = 0
+
+            score += pnl_score
+
+            # --------------------------------------------------
+            # 5. W50 CONFIRMATION — 20 points
             # --------------------------------------------------
 
             if below_w50_count == 0:
-
                 confirmation_score = 20
 
             elif below_w50_count == 1:
-
                 confirmation_score = 10
 
             else:
-
                 confirmation_score = 0
 
             score += confirmation_score
 
+            # Final score
             score = int(score)
 
             # ==================================================
