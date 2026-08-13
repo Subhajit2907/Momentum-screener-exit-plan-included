@@ -192,38 +192,59 @@ def rank_replacements(holding, candidates):
     return ranked
 
 
+def _rotation_priority(signal):
+    """Lower value means higher portfolio urgency."""
+    signal = str(signal or "").upper()
+    if "EXIT" in signal:
+        return 0
+    if "REDUCE" in signal:
+        return 1
+    return 2
+
+
 def _assignment_objective(result):
     """
-    Return a lexicographic objective for the global one-to-one assignment.
+    Return a hierarchical lexicographic objective for the global assignment.
 
-    Priority:
+    Portfolio urgency is deliberately part of the objective. A hard EXIT
+    must be optimized before a REDUCE, and a REDUCE before a WATCH. Within
+    each urgency tier we then optimize the existing rotation quality metrics.
+
+    Priority within each tier:
       1. Assign as many positions as possible.
       2. Maximise total advantage.
       3. Maximise the weakest assigned advantage.
       4. Maximise total candidate momentum.
       5. Maximise total candidate composite score.
       6. Prefer stronger/stabler candidate ranks as the final tie-break.
-    """
-    assigned = result["assigned"]
-    if not assigned:
-        min_advantage = -10**9
-    else:
-        min_advantage = min(item["Advantage"] for item in assigned)
 
-    return (
-        len(assigned),
-        sum(item["Advantage"] for item in assigned),
-        min_advantage,
-        sum(item["Candidate Momentum"] for item in assigned),
-        sum(
-            _num(item.get("Composite Score")) or 0
-            for item in assigned
-        ),
-        -sum(
-            _num(item.get("Candidate Rank")) or 10**6
-            for item in assigned
-        ),
-    )
+    This prevents a lower-urgency holding from taking the best candidate away
+    from a hard EXIT merely because the combined raw advantage happens to tie.
+    """
+    assigned = result.get("assigned", [])
+    objective = []
+
+    for priority in (0, 1, 2):
+        group = [
+            item for item in assigned
+            if int(item.get("Rotation Priority", 2)) == priority
+        ]
+
+        if group:
+            min_advantage = min(item["Advantage"] for item in group)
+        else:
+            min_advantage = -10**9
+
+        objective.extend((
+            len(group),
+            sum(item["Advantage"] for item in group),
+            min_advantage,
+            sum(item["Candidate Momentum"] for item in group),
+            sum(_num(item.get("Composite Score")) or 0 for item in group),
+            -sum(_num(item.get("Candidate Rank")) or 10**6 for item in group),
+        ))
+
+    return tuple(objective)
 
 
 def _better_assignment(left, right):
@@ -239,13 +260,18 @@ def _solve_one_to_one_assignment(reviews):
     """
     Assign distinct eligible candidates to multiple portfolio positions.
 
-    This is a small exact assignment solver using dynamic programming over
-    candidate bitmasks. A candidate can be assigned at most once in the same
-    rotation batch.
+    The solver is exact for the small rotation pools used by the application.
+    Candidate/holding pairs must already meet the existing Phase 2B advantage
+    threshold, so this function changes allocation behaviour, not eligibility
+    or scoring.
 
-    Only candidate/holding pairs that already meet the existing Phase 2B
-    advantage threshold are considered eligible. Thus this function changes
-    allocation behaviour, not candidate eligibility or scoring.
+    IMPORTANT: assignment is optimized hierarchically by Phase 2A urgency:
+
+        EXIT > REDUCE > WATCH
+
+    Thus a hard EXIT gets first priority for the best available replacement.
+    Within each urgency tier, the existing global assignment objective is
+    preserved.
     """
     if not reviews:
         return {}
@@ -273,12 +299,15 @@ def _solve_one_to_one_assignment(reviews):
     edges = []
     for review in reviews:
         by_candidate = {}
+        priority = _rotation_priority(review.get("Phase 2A Signal"))
         for candidate in review.get("Candidates", []):
             symbol = candidate["Candidate"]
             if not candidate.get("Meets Advantage"):
                 continue
             if symbol in candidate_index:
-                by_candidate[symbol] = candidate
+                item = dict(candidate)
+                item["Rotation Priority"] = priority
+                by_candidate[symbol] = item
         edges.append(by_candidate)
 
     memo = {}
@@ -294,10 +323,10 @@ def _solve_one_to_one_assignment(reviews):
             return result
 
         # Option 1: leave this position unassigned.
-        best = solve(position_index + 1, used_mask)
+        tail = solve(position_index + 1, used_mask)
         best = {
-            "assigned": list(best["assigned"]),
-            "skipped": [position_index] + list(best["skipped"]),
+            "assigned": list(tail["assigned"]),
+            "skipped": [position_index] + list(tail["skipped"]),
         }
 
         # Option 2: assign each currently unused suitable candidate.
@@ -328,7 +357,6 @@ def _solve_one_to_one_assignment(reviews):
         item["Position Index"]: item
         for item in solution["assigned"]
     }
-
 
 def build_rotation_review(passed_rows, exit_signals):
     """
