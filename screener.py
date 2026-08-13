@@ -202,7 +202,7 @@ def check_exit_signals(holdings, progress_callback=None):
     if progress_callback:
         progress_callback(
             f"Checking portfolio exit signals for "
-            f"{len(symbols)} holdings (weekly data)…"
+            f"{len(symbols)} holdings (weekly + daily data)…"
         )
 
     # ----------------------------------------------------------
@@ -232,6 +232,39 @@ def check_exit_signals(holdings, progress_callback=None):
             }
             for h in holdings
         ]
+
+    # ----------------------------------------------------------
+    # Download daily data for current P&L and peak drawdown.
+    #
+    # Weekly data remains the source for:
+    #   - Weekly 20/50 EMA
+    #   - Weekly RSI
+    #   - Weekly W50 confirmation
+    #
+    # Daily data is used for:
+    #   - Latest available price
+    #   - Position P&L
+    #   - Peak drawdown since entry
+    #
+    # This is important because the -20% hard exit is a
+    # position-risk rule and should not wait for a weekly close.
+    # ----------------------------------------------------------
+
+    try:
+
+        daily_raw = yf.download(
+            tickers,
+            period="5y",
+            interval="1d",
+            group_by="ticker",
+            auto_adjust=config.AUTO_ADJUST,
+            progress=False,
+            threads=config.YFINANCE_THREADS,
+        )
+
+    except Exception:
+
+        daily_raw = None
 
     results = []
 
@@ -265,6 +298,11 @@ def check_exit_signals(holdings, progress_callback=None):
                     "Weekly RSI": "—",
                     "W50 Below Weeks": "—",
                     "Peak Drawdown": "—",
+                    "Trend Score": "—",
+                    "Momentum Score": "—",
+                    "Drawdown Score": "—",
+                    "P&L Score": "—",
+                    "Confirmation Score": "—",
                     "Exit Score": "—",
                     "P&L %": "—",
                     "Signal": "⚠ Insufficient data",
@@ -289,6 +327,11 @@ def check_exit_signals(holdings, progress_callback=None):
                     "Weekly RSI": "—",
                     "W50 Below Weeks": "—",
                     "Peak Drawdown": "—",
+                    "Trend Score": "—",
+                    "Momentum Score": "—",
+                    "Drawdown Score": "—",
+                    "P&L Score": "—",
+                    "Confirmation Score": "—",
                     "Exit Score": "—",
                     "P&L %": "—",
                     "Signal": "⚠ Insufficient data",
@@ -304,9 +347,25 @@ def check_exit_signals(holdings, progress_callback=None):
 
             # --------------------------------------------------
             # Current price
+            #
+            # Prefer latest daily close. Fall back to weekly close
+            # if daily data is unavailable.
             # --------------------------------------------------
 
-            current = float(closes[-1])
+            daily_close_series = pd.Series(dtype=float)
+
+            if daily_raw is not None:
+                daily_close_series = extract_series_with_dates(
+                    daily_raw,
+                    ticker,
+                    "Close",
+                    tickers,
+                )
+
+            if not daily_close_series.empty:
+                current = float(daily_close_series.iloc[-1])
+            else:
+                current = float(closes[-1])
 
             # --------------------------------------------------
             # Weekly EMA series
@@ -402,16 +461,26 @@ def check_exit_signals(holdings, progress_callback=None):
 
             # --------------------------------------------------
             # Peak since entry
+            #
+            # Use daily closes when available so drawdown reflects
+            # the actual position history rather than only weekly
+            # observations.
             # --------------------------------------------------
+
+            peak_source = (
+                daily_close_series
+                if not daily_close_series.empty
+                else close_series
+            )
 
             if entry_date is not None and not pd.isna(entry_date):
 
                 entry_mask = (
-                    close_series.index
+                    peak_source.index
                     >= entry_date
                 )
 
-                post_entry = close_series.loc[
+                post_entry = peak_source.loc[
                     entry_mask
                 ]
 
@@ -419,11 +488,11 @@ def check_exit_signals(holdings, progress_callback=None):
 
                 # If Entry Date is unavailable,
                 # use the complete available history.
-                post_entry = close_series
+                post_entry = peak_source
 
             if post_entry.empty:
 
-                post_entry = close_series
+                post_entry = peak_source
 
             peak_close = float(
                 post_entry.max()
@@ -457,29 +526,6 @@ def check_exit_signals(holdings, progress_callback=None):
                     / entry_price
                     * 100
                 )
-            # --------------------------------------------------
-            # Position P&L — 10 points
-            # --------------------------------------------------
-
-            pnl_score = 0
-
-            if pnl is not None:
-
-                if pnl >= 10:
-                    pnl_score = 10
-
-                elif pnl >= 0:
-                    pnl_score = 7
-
-                elif pnl >= -5:
-                    pnl_score = 4
-
-                elif pnl >= -10:
-                    pnl_score = 1
-
-                else:
-                    pnl_score = 0
-
             # ==================================================
             # EXIT SCORE
             # ==================================================
@@ -609,31 +655,51 @@ def check_exit_signals(holdings, progress_callback=None):
             # SIGNAL
             # ==================================================
 
-            # Hard exit:
-            # 2+ consecutive weekly closes below W50
-            # AND weekly RSI below 45.
-            #
-            # This overrides the score.
+            # ==================================================
+            # HARD EXIT OVERRIDES
             # ==================================================
 
+            # --------------------------------------------------
+            # 1. Position loss reaches hard limit
+            # --------------------------------------------------
+
             if (
-                below_w50_count
-                >= config.PORTFOLIO_EXIT_CONFIRMATION_WEEKS
-                and weekly_rsi is not None
-                and weekly_rsi
-                < config.PORTFOLIO_RSI_SEVERE
+                    pnl is not None
+                    and pnl <= config.PORTFOLIO_HARD_EXIT_PNL
             ):
 
                 signal = "🔴 EXIT"
 
                 action = (
-                    "Exit — confirmed weekly trend "
-                    "breakdown"
+                    "Exit — position loss reached "
+                    f"{config.PORTFOLIO_HARD_EXIT_PNL:.0f}%"
                 )
 
+
+            # --------------------------------------------------
+            # 2. Confirmed weekly trend breakdown
+            # --------------------------------------------------
+
             elif (
-                score
-                >= config.PORTFOLIO_STRONG_HOLD_SCORE
+                    below_w50_count
+                    >= config.PORTFOLIO_EXIT_CONFIRMATION_WEEKS
+                    and weekly_rsi is not None
+                    and weekly_rsi < config.PORTFOLIO_RSI_SEVERE
+            ):
+
+                signal = "🔴 EXIT"
+
+                action = (
+                    "Exit — confirmed weekly trend breakdown"
+                )
+
+
+            # --------------------------------------------------
+            # 3. Normal score-based classification
+            # --------------------------------------------------
+
+            elif (
+                    score >= config.PORTFOLIO_STRONG_HOLD_SCORE
             ):
 
                 signal = "🟢 STRONG HOLD"
@@ -642,18 +708,18 @@ def check_exit_signals(holdings, progress_callback=None):
                     "Trend healthy — continue holding"
                 )
 
+
             elif (
-                score
-                >= config.PORTFOLIO_HOLD_SCORE
+                    score >= config.PORTFOLIO_HOLD_SCORE
             ):
 
                 signal = "🟢 HOLD"
 
                 action = "Hold position"
 
+
             elif (
-                score
-                >= config.PORTFOLIO_WATCH_SCORE
+                    score >= config.PORTFOLIO_WATCH_SCORE
             ):
 
                 signal = "🟡 WATCH"
@@ -663,9 +729,9 @@ def check_exit_signals(holdings, progress_callback=None):
                     "review next cycle"
                 )
 
+
             elif (
-                score
-                >= config.PORTFOLIO_REDUCE_SCORE
+                    score >= config.PORTFOLIO_REDUCE_SCORE
             ):
 
                 signal = "🟠 REDUCE"
@@ -674,6 +740,7 @@ def check_exit_signals(holdings, progress_callback=None):
                     "Multiple warning signs — "
                     "consider reducing position"
                 )
+
 
             else:
 
@@ -760,6 +827,21 @@ def check_exit_signals(holdings, progress_callback=None):
                 "Peak Drawdown":
                     f"-{peak_drawdown:.1f}%",
 
+                "Trend Score":
+                    trend_score,
+
+                "Momentum Score":
+                    momentum_score,
+
+                "Drawdown Score":
+                    drawdown_score,
+
+                "P&L Score":
+                    pnl_score,
+
+                "Confirmation Score":
+                    confirmation_score,
+
                 "Exit Score":
                     score,
 
@@ -811,6 +893,21 @@ def check_exit_signals(holdings, progress_callback=None):
                     "—",
 
                 "Peak Drawdown":
+                    "—",
+
+                "Trend Score":
+                    "—",
+
+                "Momentum Score":
+                    "—",
+
+                "Drawdown Score":
+                    "—",
+
+                "P&L Score":
+                    "—",
+
+                "Confirmation Score":
                     "—",
 
                 "Exit Score":

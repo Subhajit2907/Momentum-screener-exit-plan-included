@@ -196,3 +196,12 @@ EXIT_TREND_WEIGHT = 40
 EXIT_MOMENTUM_WEIGHT = 20
 EXIT_DRAWDOWN_WEIGHT = 20
 EXIT_CONFIRMATION_WEIGHT = 20
+
+# ==========================================================
+# Hard Exit Rules
+# ==========================================================
+
+# Immediate exit signal when position loss reaches this level.
+# Example: -20 means exit at -20% P&L or worse.
+PORTFOLIO_HARD_EXIT_PNL = -20
+
