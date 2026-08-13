@@ -618,6 +618,8 @@ function buildRotationTable(reviews) {
         existingMomentum: candidate['Existing Momentum'] ?? '—',
         advantage: candidate['Advantage'] ?? '—',
         required: review['Required Advantage'] ?? '—',
+        assigned: review['Assigned Candidate'] &&
+          review['Assigned Candidate'] === (candidate['Candidate'] || ''),
         recommendation: review['Recommendation'] || '—'
       });
     });
@@ -627,6 +629,7 @@ function buildRotationTable(reviews) {
     <th>Existing</th>
     <th>Phase 2A</th>
     <th>Outcome</th>
+    <th>Assigned</th>
     <th>Candidate</th>
     <th>Rank</th>
     <th>Candidate Momentum</th>
@@ -666,6 +669,7 @@ function buildRotationTable(reviews) {
         <td><span class="sym">${r.existing}</span></td>
         <td>${r.signal}</td>
         <td class="${outcomeCls}">${r.outcome}</td>
+        <td>${r.assigned ? '✅' : ''}</td>
         <td><span class="sym">${r.candidate}</span></td>
         <td>${r.rank}</td>
         <td class="score">${r.candidateMomentum}</td>
