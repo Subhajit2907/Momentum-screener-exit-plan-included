@@ -171,6 +171,15 @@
   .exit-row-watch  { background: #2b2410; }
   .exit-row-reduce { background: #2d1d12; }
   .exit-row-exit   { background: #2d1117; }
+
+  .rotation-replace { color: var(--green); font-weight: 700; }
+  .rotation-cash    { color: var(--gold); font-weight: 700; }
+  .rotation-review  { color: var(--accent2); font-weight: 700; }
+  .rotation-keep    { color: var(--muted); font-weight: 600; }
+  .rotation-row-exit { background: #2d1117; }
+  .rotation-row-reduce { background: #2d1d12; }
+  .rotation-row-watch { background: #2b2410; }
+
   .star   { color: var(--gold); margin-right: 2px; }
 
   /* ── Section toggle ── */
@@ -277,6 +286,13 @@
   <div id="exit-signals-section" class="hidden" style="margin-top:18px">
     <div class="card-title" style="margin-bottom:8px">🚨 Exit Signal Check</div>
     <div class="tbl-wrap" id="exit-wrap"></div>
+  </div>
+
+  <!-- Phase 2B Rotation Review -->
+  <div id="rotation-section" class="hidden" style="margin-top:18px">
+    <div class="card-title" style="margin-bottom:8px">🔄 Portfolio Rotation Review</div>
+    <div id="rotation-summary"></div>
+    <div class="tbl-wrap" id="rotation-wrap"></div>
   </div>
 
   <!-- Top 10 table -->
@@ -503,6 +519,9 @@ function renderResults(result) {
     document.getElementById('exit-signals-section').classList.add('hidden');
   }
 
+  // Phase 2B — Portfolio Rotation Review
+  renderRotationReview(result.rotation_review);
+
   // Top 10
   document.getElementById('top10-wrap').innerHTML = buildTable(result.top10, true);
 
@@ -528,6 +547,142 @@ function renderResults(result) {
   } else {
     document.getElementById('rej-toggle').style.display = 'none';
   }
+}
+
+function renderRotationReview(review) {
+  const section = document.getElementById('rotation-section');
+
+  if (!review || !review.reviews || review.reviews.length === 0) {
+    section.classList.add('hidden');
+    return;
+  }
+
+  section.classList.remove('hidden');
+
+  const replacementCount = Number(review.replacement_count || 0);
+  const cashCount = Number(review.cash_count || 0);
+  const poolSize = Number(review.candidate_pool_size || 0);
+
+  let summary = `
+    <div class="alert alert-info" style="margin-bottom:10px">
+      🔄 ${replacementCount} rotation opportunity${replacementCount === 1 ? '' : 'ies'}
+      · ${cashCount} position${cashCount === 1 ? '' : 's'} with no suitable replacement
+      · ${poolSize} eligible candidate${poolSize === 1 ? '' : 's'} in the rotation pool
+    </div>
+  `;
+
+  if (cashCount > 0) {
+    summary += `
+      <div class="alert" style="margin-bottom:10px;background:#2b2410;border-color:var(--gold);color:var(--gold)">
+        💵 At least one EXIT has no suitable replacement candidate.
+        Released capital should be parked in cash equivalents until a qualifying candidate emerges.
+      </div>
+    `;
+  }
+
+  document.getElementById('rotation-summary').innerHTML = summary;
+  document.getElementById('rotation-wrap').innerHTML =
+    buildRotationTable(review.reviews);
+}
+
+function buildRotationTable(reviews) {
+  const rows = [];
+
+  reviews.forEach(review => {
+    const candidates = review.Candidates || [];
+
+    if (candidates.length === 0) {
+      rows.push({
+        existing: review['Existing Symbol'] || '—',
+        signal: review['Phase 2A Signal'] || '—',
+        outcome: review['Outcome'] || '—',
+        candidate: 'No candidate',
+        rank: '—',
+        candidateMomentum: '—',
+        existingMomentum: review['Existing Momentum'] ?? '—',
+        advantage: '—',
+        required: review['Required Advantage'] ?? '—',
+        recommendation: review['Recommendation'] || '—'
+      });
+      return;
+    }
+
+    candidates.forEach(candidate => {
+      rows.push({
+        existing: review['Existing Symbol'] || '—',
+        signal: review['Phase 2A Signal'] || '—',
+        outcome: review['Outcome'] || '—',
+        candidate: candidate['Candidate'] || '—',
+        rank: candidate['Candidate Rank'] ?? '—',
+        candidateMomentum: candidate['Candidate Momentum'] ?? '—',
+        existingMomentum: candidate['Existing Momentum'] ?? '—',
+        advantage: candidate['Advantage'] ?? '—',
+        required: review['Required Advantage'] ?? '—',
+        recommendation: review['Recommendation'] || '—'
+      });
+    });
+  });
+
+  const head = `
+    <th>Existing</th>
+    <th>Phase 2A</th>
+    <th>Outcome</th>
+    <th>Candidate</th>
+    <th>Rank</th>
+    <th>Candidate Momentum</th>
+    <th>Existing Momentum</th>
+    <th>Advantage</th>
+    <th>Required</th>
+    <th>Recommendation</th>
+  `;
+
+  const body = rows.map(r => {
+    const outcome = String(r.outcome).toUpperCase();
+
+    let outcomeCls = 'rotation-keep';
+    let rowCls = '';
+
+    if (outcome === 'REPLACE' || outcome === 'ROTATE') {
+      outcomeCls = 'rotation-replace';
+    } else if (outcome === 'CASH') {
+      outcomeCls = 'rotation-cash';
+      rowCls = 'rotation-row-exit';
+    } else if (outcome === 'ROTATION REVIEW') {
+      outcomeCls = 'rotation-review';
+      rowCls = 'rotation-row-watch';
+    }
+
+    if (outcome === 'ROTATE') {
+      rowCls = 'rotation-row-reduce';
+    }
+
+    const advantage = Number(r.advantage);
+    const advantageDisplay = Number.isFinite(advantage)
+      ? (advantage >= 0 ? '+' + advantage : String(advantage))
+      : '—';
+
+    return `
+      <tr class="${rowCls}">
+        <td><span class="sym">${r.existing}</span></td>
+        <td>${r.signal}</td>
+        <td class="${outcomeCls}">${r.outcome}</td>
+        <td><span class="sym">${r.candidate}</span></td>
+        <td>${r.rank}</td>
+        <td class="score">${r.candidateMomentum}</td>
+        <td class="score">${r.existingMomentum}</td>
+        <td class="score">${advantageDisplay}</td>
+        <td>${r.required}</td>
+        <td style="text-align:left;white-space:normal;min-width:330px">${r.recommendation}</td>
+      </tr>
+    `;
+  }).join('');
+
+  return `
+    <table style="min-width:1250px">
+      <thead><tr>${head}</tr></thead>
+      <tbody>${body}</tbody>
+    </table>
+  `;
 }
 
 function buildTable(rows, isTop10) {
