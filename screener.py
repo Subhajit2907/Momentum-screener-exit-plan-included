@@ -777,7 +777,7 @@ def check_exit_signals(holdings, progress_callback=None):
 
                 pnl_str = (
                     f"{'+' if pnl >= 0 else ''}"
-                    f"{pnl:.1f}%"
+                    f"{pnl:.2f}%"
                 )
 
             w50_str = (
