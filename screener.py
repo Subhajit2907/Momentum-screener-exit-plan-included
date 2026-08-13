@@ -368,6 +368,52 @@ def check_exit_signals(holdings, progress_callback=None):
                 current = float(closes[-1])
 
             # --------------------------------------------------
+            # Phase 2B — Daily momentum snapshot for rotation
+            #
+            # These fields deliberately use the same daily indicators
+            # as the normal universe screener so an existing holding
+            # and a new candidate are comparable on the same basis.
+            # --------------------------------------------------
+            daily_closes = daily_close_series.astype(float).tolist()
+
+            if len(daily_closes) >= 200:
+                daily_ema50 = calc_ema(daily_closes, config.EMA_SHORT)
+                daily_ema100 = calc_ema(daily_closes, config.EMA_MEDIUM)
+                daily_ema200 = calc_ema(daily_closes, config.EMA_LONG)
+                daily_rsi = calc_rsi(
+                    daily_closes,
+                    config.RSI_PERIOD,
+                )
+                daily_avg_vol = None
+
+                daily_volume_series = pd.Series(dtype=float)
+                if daily_raw is not None:
+                    daily_volume_series = extract_series_with_dates(
+                        daily_raw,
+                        ticker,
+                        "Volume",
+                        tickers,
+                    )
+
+                if not daily_volume_series.empty:
+                    daily_avg_vol = calc_average_volume(
+                        daily_volume_series.astype(float).tolist(),
+                        config.AVG_VOLUME_PERIOD,
+                    )
+
+                daily_high_52w, daily_pct_from_high = calc_52week_metrics(
+                    daily_closes
+                )
+            else:
+                daily_ema50 = None
+                daily_ema100 = None
+                daily_ema200 = None
+                daily_rsi = None
+                daily_avg_vol = None
+                daily_high_52w = None
+                daily_pct_from_high = None
+
+            # --------------------------------------------------
             # Weekly EMA series
             # --------------------------------------------------
 
@@ -777,7 +823,7 @@ def check_exit_signals(holdings, progress_callback=None):
 
                 pnl_str = (
                     f"{'+' if pnl >= 0 else ''}"
-                    f"{pnl:.2f}%"
+                    f"{pnl:.1f}%"
                 )
 
             w50_str = (
@@ -801,6 +847,53 @@ def check_exit_signals(holdings, progress_callback=None):
 
                 "Current Price":
                     round(current, 2),
+
+                # Phase 2B daily rotation metrics
+                "50 EMA":
+                    round(daily_ema50, 2)
+                    if daily_ema50 is not None else "—",
+                "100 EMA":
+                    round(daily_ema100, 2)
+                    if daily_ema100 is not None else "—",
+                "200 EMA":
+                    round(daily_ema200, 2)
+                    if daily_ema200 is not None else "—",
+                "vs 50 EMA":
+                    (
+                        f"{'+' if current >= daily_ema50 else ''}"
+                        f"{((current - daily_ema50) / daily_ema50 * 100):.1f}%"
+                    )
+                    if daily_ema50 is not None else "—",
+                "vs 100 EMA":
+                    (
+                        f"{'+' if current >= daily_ema100 else ''}"
+                        f"{((current - daily_ema100) / daily_ema100 * 100):.1f}%"
+                    )
+                    if daily_ema100 is not None else "—",
+                "vs 200 EMA":
+                    (
+                        f"{'+' if current >= daily_ema200 else ''}"
+                        f"{((current - daily_ema200) / daily_ema200 * 100):.1f}%"
+                    )
+                    if daily_ema200 is not None else "—",
+                "RSI (14)":
+                    round(daily_rsi, 1)
+                    if daily_rsi is not None else "—",
+                "Avg Vol (20d)":
+                    (
+                        f"{daily_avg_vol / 1e6:.2f}M"
+                        if daily_avg_vol is not None else "—"
+                    ),
+                "52W High (₹)":
+                    (
+                        round(daily_high_52w, 2)
+                        if daily_high_52w is not None else "—"
+                    ),
+                "% from 52W High":
+                    (
+                        f"-{daily_pct_from_high}%"
+                        if daily_pct_from_high is not None else "—"
+                    ),
 
                 "Weekly 20 EMA":
                     round(weekly_ema20, 2),
@@ -1012,8 +1105,9 @@ def run_screener(raw, symbols, tickers, progress_callback=None):
                     "50 EMA":          round(ema50,  2),
                     "100 EMA":         round(ema100, 2),
                     "200 EMA":         round(ema200, 2),
-                    "vs 50 EMA":       f"+{round((current-ema50)/ema50*100,1)}%",
-                    "vs 200 EMA":      f"+{round((current-ema200)/ema200*100,1)}%",
+                    "vs 50 EMA":       f"{'+' if current >= ema50 else ''}{round((current-ema50)/ema50*100,1)}%",
+                    "vs 100 EMA":      f"{'+' if current >= ema100 else ''}{round((current-ema100)/ema100*100,1)}%",
+                    "vs 200 EMA":      f"{'+' if current >= ema200 else ''}{round((current-ema200)/ema200*100,1)}%",
                     "RSI (14)":        rsi,
                     "Avg Vol (20d)":   f"{avg_vol/1e6:.2f}M",
                     "52W High (₹)":    high_52w,
@@ -1100,9 +1194,44 @@ def run_full_screen(file_bytes, holdings_bytes=None, progress_callback=None):
             if progress_callback:
                 progress_callback(f"Holdings check skipped: {str(e)}")
 
-    excel_bytes = build_excel(df, rejected, run_date, exit_signals) if not df.empty else None
-
     all_passed = df.to_dict(orient="records") if not df.empty else []
+
+    # Phase 2B rotation review.
+    # Imported lazily so the settled Phase 2A engine remains independently
+    # usable and a rotation-module error does not break screening itself.
+    rotation_review = {
+        "reviews": [],
+        "candidate_pool_size": 0,
+        "replacement_count": 0,
+        "cash_count": 0,
+    }
+
+    if exit_signals and all_passed:
+        try:
+            from rotation import build_rotation_review
+
+            rotation_review = build_rotation_review(
+                all_passed,
+                exit_signals,
+            )
+
+            if progress_callback:
+                progress_callback(
+                    "Phase 2B rotation review completed."
+                )
+        except Exception as e:
+            if progress_callback:
+                progress_callback(
+                    f"Phase 2B rotation review skipped: {str(e)[:100]}"
+                )
+
+    excel_bytes = build_excel(
+        df,
+        rejected,
+        run_date,
+        exit_signals,
+    ) if not df.empty else None
+
     top10      = [r for r in all_passed if r.get("Rank", 99) <= 10]
 
     exit_count = sum(1 for e in exit_signals if "EXIT" in str(e.get("Signal", "")))
@@ -1123,6 +1252,7 @@ def run_full_screen(file_bytes, holdings_bytes=None, progress_callback=None):
         "all_passed":   all_passed,
         "rejected":     rejected,
         "exit_signals": exit_signals,
+        "rotation_review": rotation_review,
         "stats":        stats,
         "excel_bytes":  excel_bytes,
         "run_date":     run_date,
