@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -160,6 +161,16 @@
   .rsi-hi { color: #3fb950; font-weight: 700; }
   .rsi-lo { color: #d29922; font-weight: 700; }
   .score  { color: var(--accent2); font-weight: 700; }
+
+  .signal-strong { color: var(--green); font-weight: 700; }
+  .signal-hold   { color: var(--green); font-weight: 700; }
+  .signal-watch  { color: var(--gold); font-weight: 700; }
+  .signal-reduce { color: #f0883e; font-weight: 700; }
+  .signal-exit   { color: var(--red); font-weight: 700; }
+
+  .exit-row-watch  { background: #2b2410; }
+  .exit-row-reduce { background: #2d1d12; }
+  .exit-row-exit   { background: #2d1117; }
   .star   { color: var(--gold); margin-right: 2px; }
 
   /* ── Section toggle ── */
@@ -192,7 +203,7 @@
 
 <header>
   <h1>📈 Nifty Midcap Screener</h1>
-  <p>EMA · RSI · Volume · 52W High — Top 10 by Composite Score</p>
+  <p>EMA · RSI · Volume · 52W High — Momentum Screening + Portfolio Health</p>
 </header>
 
 <!-- Upload card -->
@@ -232,7 +243,7 @@
 <div class="card" id="holdings-card">
   <div class="card-title">🚨 Exit Signal Check (Optional)</div>
   <div class="upload-hint" style="margin-bottom:10px">
-    Upload your current holdings to check for exit signals (price below weekly 50 EMA).
+    Upload your current holdings to check Phase 2A portfolio health, hard exits, and weekly trend signals.
     CSV needs columns: <strong>Symbol</strong>, Entry Date, Entry Price.
   </div>
 
@@ -442,19 +453,52 @@ function renderResults(result) {
     document.getElementById('exit-signals-section').classList.remove('hidden');
     document.getElementById('exit-wrap').innerHTML = buildExitTable(result.exit_signals);
 
-    if (s.exit_alerts > 0) {
-      document.getElementById('exit-wrap').insertAdjacentHTML('beforebegin',
-        `<div class="alert alert-error" style="margin-bottom:10px">
-          🚨 ${s.exit_alerts} holding${s.exit_alerts > 1 ? 's' : ''} below weekly 50 EMA — review for exit
-        </div>`
-      );
+    const exitSignals = result.exit_signals || [];
+
+    const hasExit = exitSignals.some(r =>
+      String(r['Signal'] || '').includes('EXIT')
+    );
+
+    const hasReduceOrWatch = exitSignals.some(r => {
+      const signal = String(r['Signal'] || '');
+      return signal.includes('REDUCE') || signal.includes('WATCH');
+    });
+
+    let portfolioAlert;
+
+    if (hasExit) {
+      const exitCount = exitSignals.filter(r =>
+        String(r['Signal'] || '').includes('EXIT')
+      ).length;
+
+      portfolioAlert = `
+        <div class="alert alert-error" style="margin-bottom:10px">
+          🚨 ${exitCount} holding${exitCount > 1 ? 's' : ''} has a hard exit or confirmed exit signal — action required
+        </div>
+      `;
+    } else if (hasReduceOrWatch) {
+      const attentionCount = exitSignals.filter(r => {
+        const signal = String(r['Signal'] || '');
+        return signal.includes('REDUCE') || signal.includes('WATCH');
+      }).length;
+
+      portfolioAlert = `
+        <div class="alert" style="margin-bottom:10px;background:#2b2410;border-color:var(--gold);color:var(--gold)">
+          🟡 ${attentionCount} holding${attentionCount > 1 ? 's' : ''} need${attentionCount === 1 ? 's' : ''} portfolio review — WATCH/REDUCE signal detected
+        </div>
+      `;
     } else {
-      document.getElementById('exit-wrap').insertAdjacentHTML('beforebegin',
-        `<div class="alert alert-info" style="margin-bottom:10px">
-          ✅ All holdings above weekly 50 EMA — no exit signals
-        </div>`
-      );
+      portfolioAlert = `
+        <div class="alert alert-info" style="margin-bottom:10px">
+          ✅ All holdings healthy — no exit or warning signals
+        </div>
+      `;
     }
+
+    document.getElementById('exit-wrap').insertAdjacentHTML(
+      'beforebegin',
+      portfolioAlert
+    );
   } else {
     document.getElementById('exit-signals-section').classList.add('hidden');
   }
@@ -535,29 +579,91 @@ function buildExitTable(rows) {
     return '<div class="alert alert-info">No holdings to check.</div>';
 
   const head = `
-    <th>Symbol</th><th>Entry Date</th><th>Entry Price</th>
-    <th>Current</th><th>W-50 EMA</th><th>vs W50</th><th>P&L</th><th>Signal</th>
+    <th>Symbol</th>
+    <th>Entry Date</th>
+    <th>Entry Price</th>
+    <th>Current</th>
+    <th>W-50 EMA</th>
+    <th>vs W50</th>
+    <th>RSI</th>
+    <th>W50 Below</th>
+    <th>Peak DD</th>
+    <th>P&L</th>
+    <th>Trend</th>
+    <th>Momentum</th>
+    <th>DD</th>
+    <th>P&L Score</th>
+    <th>Confirm</th>
+    <th>Exit Score</th>
+    <th>Signal</th>
+    <th>Action</th>
   `;
 
   const body = rows.map(r => {
-    const isExit = String(r['Signal'] || '').includes('EXIT');
-    const sigCls = isExit ? 'rsi-lo' : 'rsi-hi';
-    const pnl = r['P&L %'] || '—';
-    const pnlCls = String(pnl).startsWith('+') ? 'pos' : (String(pnl).startsWith('-') ? 'rsi-lo' : '');
+    const signal = String(r['Signal'] || '—');
 
-    return `<tr class="${isExit ? '' : ''}" style="${isExit ? 'background:#2d1117' : ''}">
-      <td><span class="sym">${r['Symbol']}</span></td>
-      <td>${r['Entry Date'] || '—'}</td>
-      <td>${r['Entry Price'] || '—'}</td>
-      <td>${r['Current Price'] !== undefined ? '₹' + r['Current Price'] : '—'}</td>
-      <td>${r['Weekly 50 EMA'] !== undefined ? '₹' + r['Weekly 50 EMA'] : '—'}</td>
-      <td>${r['vs W50 EMA'] || '—'}</td>
+    const isExit = signal.includes('EXIT');
+    const isReduce = signal.includes('REDUCE');
+    const isWatch = signal.includes('WATCH');
+    const isStrong = signal.includes('STRONG HOLD');
+    const isHold = signal.includes('HOLD') && !isStrong;
+
+    let signalCls = '';
+    let rowCls = '';
+
+    if (isExit) {
+      signalCls = 'signal-exit';
+      rowCls = 'exit-row-exit';
+    } else if (isReduce) {
+      signalCls = 'signal-reduce';
+      rowCls = 'exit-row-reduce';
+    } else if (isWatch) {
+      signalCls = 'signal-watch';
+      rowCls = 'exit-row-watch';
+    } else if (isStrong) {
+      signalCls = 'signal-strong';
+    } else if (isHold) {
+      signalCls = 'signal-hold';
+    }
+
+    const pnl = r['P&L %'] ?? '—';
+    const pnlCls =
+      String(pnl).startsWith('+') ? 'pos' :
+      String(pnl).startsWith('-') ? 'rsi-lo' : '';
+
+    const rsi = r['Weekly RSI'] ?? '—';
+    const rsiNum = parseFloat(rsi);
+    const rsiCls =
+      Number.isFinite(rsiNum)
+        ? (rsiNum >= 55 ? 'rsi-hi' : 'rsi-lo')
+        : '';
+
+    return `<tr class="${rowCls}">
+      <td><span class="sym">${r['Symbol'] ?? '—'}</span></td>
+      <td>${r['Entry Date'] ?? '—'}</td>
+      <td>${r['Entry Price'] ?? '—'}</td>
+      <td>${r['Current Price'] !== undefined && r['Current Price'] !== '—' ? '₹' + Number(r['Current Price']).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2}) : '—'}</td>
+      <td>${r['Weekly 50 EMA'] !== undefined && r['Weekly 50 EMA'] !== '—' ? '₹' + Number(r['Weekly 50 EMA']).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2}) : '—'}</td>
+      <td>${r['vs W50 EMA'] ?? '—'}</td>
+      <td class="${rsiCls}">${rsi}</td>
+      <td>${r['W50 Below Weeks'] ?? '—'}</td>
+      <td>${r['Peak Drawdown'] ?? '—'}</td>
       <td class="${pnlCls}">${pnl}</td>
-      <td class="${sigCls}">${r['Signal'] || '—'}</td>
+      <td class="score">${r['Trend Score'] ?? '—'}</td>
+      <td class="score">${r['Momentum Score'] ?? '—'}</td>
+      <td class="score">${r['Drawdown Score'] ?? '—'}</td>
+      <td class="score">${r['P&L Score'] ?? '—'}</td>
+      <td class="score">${r['Confirmation Score'] ?? '—'}</td>
+      <td class="score">${r['Exit Score'] ?? '—'}</td>
+      <td class="${signalCls}">${signal}</td>
+      <td style="text-align:left;white-space:normal;min-width:260px">${r['Action'] ?? '—'}</td>
     </tr>`;
   }).join('');
 
-  return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+  return `<table style="min-width:1500px">
+    <thead><tr>${head}</tr></thead>
+    <tbody>${body}</tbody>
+  </table>`;
 }
 
 // ── Helpers ────────────────────────────────────────────
