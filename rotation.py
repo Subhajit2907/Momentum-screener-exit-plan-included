@@ -187,176 +187,14 @@ def rank_replacements(holding, candidates):
         })
 
     ranked.sort(
-        key=lambda r: (-int(r["Advantage"]), -int(r["Candidate Momentum"]))
+        key=lambda r: (
+            -int(r["Advantage"]),
+            -int(r["Candidate Momentum"]),
+            str(r["Candidate"]),
+        )
     )
     return ranked
 
-
-def _rotation_priority(signal):
-    """Lower value means higher portfolio urgency."""
-    signal = str(signal or "").upper()
-    if "EXIT" in signal:
-        return 0
-    if "REDUCE" in signal:
-        return 1
-    return 2
-
-
-def _assignment_objective(result):
-    """
-    Return a hierarchical lexicographic objective for the global assignment.
-
-    Portfolio urgency is deliberately part of the objective. A hard EXIT
-    must be optimized before a REDUCE, and a REDUCE before a WATCH. Within
-    each urgency tier we then optimize the existing rotation quality metrics.
-
-    Priority within each tier:
-      1. Assign as many positions as possible.
-      2. Maximise total advantage.
-      3. Maximise the weakest assigned advantage.
-      4. Maximise total candidate momentum.
-      5. Maximise total candidate composite score.
-      6. Prefer stronger/stabler candidate ranks as the final tie-break.
-
-    This prevents a lower-urgency holding from taking the best candidate away
-    from a hard EXIT merely because the combined raw advantage happens to tie.
-    """
-    assigned = result.get("assigned", [])
-    objective = []
-
-    for priority in (0, 1, 2):
-        group = [
-            item for item in assigned
-            if int(item.get("Rotation Priority", 2)) == priority
-        ]
-
-        if group:
-            min_advantage = min(item["Advantage"] for item in group)
-        else:
-            min_advantage = -10**9
-
-        objective.extend((
-            len(group),
-            sum(item["Advantage"] for item in group),
-            min_advantage,
-            sum(item["Candidate Momentum"] for item in group),
-            sum(_num(item.get("Composite Score")) or 0 for item in group),
-            -sum(_num(item.get("Candidate Rank")) or 10**6 for item in group),
-        ))
-
-    return tuple(objective)
-
-
-def _better_assignment(left, right):
-    """Return whichever assignment has the stronger global objective."""
-    if right is None:
-        return left
-    if _assignment_objective(left) > _assignment_objective(right):
-        return left
-    return right
-
-
-def _solve_one_to_one_assignment(reviews):
-    """
-    Assign distinct eligible candidates to multiple portfolio positions.
-
-    The solver is exact for the small rotation pools used by the application.
-    Candidate/holding pairs must already meet the existing Phase 2B advantage
-    threshold, so this function changes allocation behaviour, not eligibility
-    or scoring.
-
-    IMPORTANT: assignment is optimized hierarchically by Phase 2A urgency:
-
-        EXIT > REDUCE > WATCH
-
-    Thus a hard EXIT gets first priority for the best available replacement.
-    Within each urgency tier, the existing global assignment objective is
-    preserved.
-    """
-    if not reviews:
-        return {}
-
-    candidate_symbols = sorted({
-        candidate["Candidate"]
-        for review in reviews
-        for candidate in review.get("Candidates", [])
-        if candidate.get("Meets Advantage")
-    })
-
-    if not candidate_symbols:
-        return {}
-
-    # The rotation pool is normally small. Guard against pathological input
-    # while retaining an exact solution for the normal case.
-    if len(candidate_symbols) > 20:
-        candidate_symbols = candidate_symbols[:20]
-
-    candidate_index = {
-        symbol: index
-        for index, symbol in enumerate(candidate_symbols)
-    }
-
-    edges = []
-    for review in reviews:
-        by_candidate = {}
-        priority = _rotation_priority(review.get("Phase 2A Signal"))
-        for candidate in review.get("Candidates", []):
-            symbol = candidate["Candidate"]
-            if not candidate.get("Meets Advantage"):
-                continue
-            if symbol in candidate_index:
-                item = dict(candidate)
-                item["Rotation Priority"] = priority
-                by_candidate[symbol] = item
-        edges.append(by_candidate)
-
-    memo = {}
-
-    def solve(position_index, used_mask):
-        key = (position_index, used_mask)
-        if key in memo:
-            return memo[key]
-
-        if position_index >= len(reviews):
-            result = {"assigned": [], "skipped": []}
-            memo[key] = result
-            return result
-
-        # Option 1: leave this position unassigned.
-        tail = solve(position_index + 1, used_mask)
-        best = {
-            "assigned": list(tail["assigned"]),
-            "skipped": [position_index] + list(tail["skipped"]),
-        }
-
-        # Option 2: assign each currently unused suitable candidate.
-        for symbol, candidate in edges[position_index].items():
-            bit = 1 << candidate_index[symbol]
-            if used_mask & bit:
-                continue
-
-            tail = solve(position_index + 1, used_mask | bit)
-            option = {
-                "assigned": [
-                    {
-                        "Position Index": position_index,
-                        **candidate,
-                    }
-                ] + list(tail["assigned"]),
-                "skipped": list(tail["skipped"]),
-            }
-
-            best = _better_assignment(option, best)
-
-        memo[key] = best
-        return best
-
-    solution = solve(0, 0)
-
-    return {
-        item["Position Index"]: item
-        for item in solution["assigned"]
-    }
 
 def build_rotation_review(passed_rows, exit_signals):
     """
@@ -375,10 +213,6 @@ def build_rotation_review(passed_rows, exit_signals):
         otherwise -> KEEP
 
     HOLD / STRONG HOLD are deliberately excluded.
-
-    When multiple positions require rotation, replacement candidates are
-    assigned globally and one-to-one. The same candidate cannot be used for
-    two positions in the same rotation batch.
     """
     portfolio = list(exit_signals or [])
     candidates = prepare_candidates(
@@ -389,12 +223,99 @@ def build_rotation_review(passed_rows, exit_signals):
     maximum = int(getattr(config, "ROTATION_MAX_CANDIDATES", 5))
     reviews = []
 
-    for holding in portfolio:
-        signal = _signal(holding)
-        if not any(x in signal for x in ("EXIT", "REDUCE", "WATCH")):
-            continue
+    # A candidate can be allocated to ONLY ONE portfolio position in a
+    # single screening run. EXIT positions get first priority, followed
+    # by REDUCE and then WATCH. This prevents one stock from being shown
+    # as the replacement for multiple positions.
+    priority = {"EXIT": 0, "REDUCE": 1, "WATCH": 2}
 
-        ranked = rank_replacements(holding, candidates)
+    actionable = [
+        holding
+        for holding in portfolio
+        if any(x in _signal(holding) for x in ("EXIT", "REDUCE", "WATCH"))
+    ]
+
+    actionable.sort(
+        key=lambda holding: (
+            min(
+                (
+                    priority[x]
+                    for x in ("EXIT", "REDUCE", "WATCH")
+                    if x in _signal(holding)
+                ),
+                default=99,
+            ),
+            momentum_strength_score(holding),
+            _symbol(holding),
+        )
+    )
+
+    allocated_candidates = set()
+
+    for holding in actionable:
+        signal = _signal(holding)
+
+        # Only candidates not already allocated to an earlier holding
+        # remain available for this position.
+        available_candidates = [
+            candidate
+            for candidate in candidates
+            if _symbol(candidate) not in allocated_candidates
+        ]
+
+        ranked = rank_replacements(
+            holding,
+            available_candidates,
+        )
+
+        # Select the strongest qualifying candidate from the same ranked
+        # list that is displayed. This keeps recommendation and ranking
+        # perfectly synchronized.
+        suitable = [
+            r
+            for r in ranked
+            if r["Meets Advantage"]
+        ]
+
+        best = suitable[0] if suitable else None
+
+        if best:
+            allocated_candidates.add(best["Candidate"])
+
+        if "EXIT" in signal:
+            if best:
+                outcome = "REPLACE"
+                recommendation = (
+                    f"Exit {_symbol(holding)} and replace with {best['Candidate']}"
+                )
+            else:
+                outcome = "CASH"
+                recommendation = (
+                    "Exit position and park released capital in cash equivalents "
+                    "until a suitable candidate emerges."
+                )
+        elif "REDUCE" in signal:
+            if best:
+                outcome = "ROTATE"
+                recommendation = (
+                    f"Consider replacing {_symbol(holding)} with {best['Candidate']}"
+                )
+            else:
+                outcome = "KEEP"
+                recommendation = (
+                    "No sufficiently stronger replacement candidate found."
+                )
+        else:
+            if best:
+                outcome = "ROTATION REVIEW"
+                recommendation = (
+                    f"Consider replacing {_symbol(holding)} with {best['Candidate']}"
+                )
+            else:
+                outcome = "KEEP"
+                recommendation = (
+                    "No sufficiently stronger replacement candidate found."
+                )
 
         reviews.append({
             "Existing Symbol": _symbol(holding),
@@ -402,92 +323,16 @@ def build_rotation_review(passed_rows, exit_signals):
             "Existing Exit Score": holding.get("Exit Score", "—"),
             "Existing Momentum": momentum_strength_score(holding),
             "Required Advantage": _min_advantage(signal),
-            "Outcome": "PENDING",
-            "Recommendation": "Pending global rotation assignment.",
-            "Best Candidate": "No candidate",
-            "Best Candidate Momentum": "—",
-            "Best Advantage": "—",
-            "Assigned Candidate": None,
-            "Assigned Candidate Momentum": "—",
-            "Assigned Advantage": "—",
+            "Outcome": outcome,
+            "Recommendation": recommendation,
+            "Best Candidate": best["Candidate"] if best else "No candidate",
+            "Best Candidate Momentum": (
+                best["Candidate Momentum"] if best else "—"
+            ),
+            "Best Advantage": best["Advantage"] if best else "—",
+            "Candidate Allocated": bool(best),
             "Candidates": ranked[:maximum],
         })
-
-    # The assignment must see the full candidate ranking, not only the
-    # display-limited top N candidates. Keep the displayed list capped while
-    # retaining the complete ranking for allocation.
-    assignment_reviews = []
-    for holding_review in reviews:
-        signal = _signal(holding_review)
-        # Rebuild from the full pool for assignment.
-        full_ranked = rank_replacements(
-            next(
-                row for row in portfolio
-                if _symbol(row) == holding_review["Existing Symbol"]
-            ),
-            candidates,
-        )
-        assignment_reviews.append({
-            **holding_review,
-            "Candidates": full_ranked,
-        })
-
-    assignments = _solve_one_to_one_assignment(assignment_reviews)
-
-    for index, review in enumerate(reviews):
-        # Find the matching full review by position. Existing symbols are
-        # expected to be unique in a holdings file.
-        assignment = assignments.get(index)
-
-        signal = _signal(
-            next(
-                row for row in portfolio
-                if _symbol(row) == review["Existing Symbol"]
-            )
-        )
-
-        if assignment:
-            candidate = assignment["Candidate"]
-            review["Assigned Candidate"] = candidate
-            review["Assigned Candidate Momentum"] = assignment["Candidate Momentum"]
-            review["Assigned Advantage"] = assignment["Advantage"]
-            review["Best Candidate"] = candidate
-            review["Best Candidate Momentum"] = assignment["Candidate Momentum"]
-            review["Best Advantage"] = assignment["Advantage"]
-
-            if "EXIT" in signal:
-                outcome = "REPLACE"
-                recommendation = (
-                    f"Exit {review['Existing Symbol']} and replace with {candidate}"
-                )
-            elif "REDUCE" in signal:
-                outcome = "ROTATE"
-                recommendation = (
-                    f"Consider replacing {review['Existing Symbol']} with {candidate}"
-                )
-            else:
-                outcome = "ROTATION REVIEW"
-                recommendation = (
-                    f"Consider replacing {review['Existing Symbol']} with {candidate}"
-                )
-
-            review["Outcome"] = outcome
-            review["Recommendation"] = recommendation
-        else:
-            # No distinct candidate was available for this position after
-            # the global assignment. Do not reuse a candidate.
-            if "EXIT" in signal:
-                review["Outcome"] = "CASH"
-                review["Recommendation"] = (
-                    "Exit position and park released capital in cash equivalents "
-                    "until a suitable distinct candidate emerges."
-                )
-            else:
-                review["Outcome"] = "KEEP"
-                review["Recommendation"] = (
-                    "No distinct replacement candidate remained after global "
-                    "one-to-one allocation."
-                )
 
     return {
         "reviews": reviews,
@@ -527,9 +372,6 @@ def flatten_rotation_rows(review):
                 "Phase 2A Signal": item["Phase 2A Signal"],
                 "Outcome": item["Outcome"],
                 "Candidate": candidate["Candidate"],
-                "Assigned": (
-                    item.get("Assigned Candidate") == candidate["Candidate"]
-                ),
                 "Candidate Rank": candidate["Candidate Rank"],
                 "Candidate Momentum": candidate["Candidate Momentum"],
                 "Existing Momentum": candidate["Existing Momentum"],
