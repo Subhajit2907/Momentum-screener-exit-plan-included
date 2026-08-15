@@ -337,12 +337,14 @@ def build_rotation_review(passed_rows, exit_signals):
             "Outcome": outcome,
             "Recommendation": recommendation,
             "Best Candidate": best["Candidate"] if best else "No candidate",
+            "Best Candidate Rank": best["Candidate Rank"] if best else "—",
             "Best Candidate Momentum": (
                 best["Candidate Momentum"] if best else "—"
             ),
             "Best Advantage": best["Advantage"] if best else "—",
             "Candidate Allocated": bool(best),
-            "Candidates": ranked[:maximum],
+            "Candidates": [best] if best else [],
+            "Candidate Alternatives": ranked[1:maximum] if best else ranked[:maximum],
         })
 
     return {
