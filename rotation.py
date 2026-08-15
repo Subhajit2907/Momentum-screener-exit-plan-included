@@ -138,9 +138,16 @@ def _min_advantage(signal):
 
 
 def prepare_candidates(passed_rows, held_symbols):
-    """Return strong, not-already-held candidates ranked by strength."""
+    """
+    Return the Top-N screener picks that are not already held.
+
+    Phase 2B deliberately uses the main screener's Top-N universe rather
+    than a second hard momentum-score cutoff. The replacement decision is
+    then made using the required momentum advantage against the position
+    being replaced.
+    """
     held = {str(s).strip().upper() for s in held_symbols if s}
-    minimum = int(getattr(config, "ROTATION_MIN_CANDIDATE_SCORE", 80))
+    top_count = int(getattr(config, "TOP_PICK_COUNT", 10))
 
     candidates = []
     for row in passed_rows or []:
@@ -148,18 +155,22 @@ def prepare_candidates(passed_rows, held_symbols):
         if not symbol or symbol in held:
             continue
 
-        score = momentum_strength_score(row)
-        if score < minimum:
+        # Only the main screener's Top-N picks enter the rotation pool.
+        # This keeps candidate selection aligned with the primary strategy.
+        rank = _num(row.get("Rank"))
+        if rank is None or rank > top_count:
             continue
 
         item = dict(row)
-        item["Momentum Strength"] = score
+        item["Momentum Strength"] = momentum_strength_score(row)
         candidates.append(item)
 
     candidates.sort(
         key=lambda r: (
+            _num(r.get("Rank")) if _num(r.get("Rank")) is not None else 999,
             -int(r.get("Momentum Strength", 0)),
             -(_num(r.get("Composite Score")) or 0),
+            _symbol(r),
         )
     )
     return candidates
