@@ -467,6 +467,9 @@ function renderResults(result) {
   // Exit signals (only if holdings were uploaded)
   if (result.exit_signals && result.exit_signals.length > 0) {
     document.getElementById('exit-signals-section').classList.remove('hidden');
+    // Clear any alert inserted by a previous screening run.
+    document.querySelectorAll('.portfolio-alert').forEach(el => el.remove());
+
     document.getElementById('exit-wrap').innerHTML = buildExitTable(result.exit_signals);
 
     const exitSignals = result.exit_signals || [];
@@ -488,7 +491,7 @@ function renderResults(result) {
       ).length;
 
       portfolioAlert = `
-        <div class="alert alert-error" style="margin-bottom:10px">
+        <div class="alert alert-error portfolio-alert" style="margin-bottom:10px">
           🚨 ${exitCount} holding${exitCount > 1 ? 's' : ''} has a hard exit or confirmed exit signal — action required
         </div>
       `;
@@ -499,13 +502,13 @@ function renderResults(result) {
       }).length;
 
       portfolioAlert = `
-        <div class="alert" style="margin-bottom:10px;background:#2b2410;border-color:var(--gold);color:var(--gold)">
+        <div class="alert portfolio-alert" style="margin-bottom:10px;background:#2b2410;border-color:var(--gold);color:var(--gold)">
           🟡 ${attentionCount} holding${attentionCount > 1 ? 's' : ''} need${attentionCount === 1 ? 's' : ''} portfolio review — WATCH/REDUCE signal detected
         </div>
       `;
     } else {
       portfolioAlert = `
-        <div class="alert alert-info" style="margin-bottom:10px">
+        <div class="alert alert-info portfolio-alert" style="margin-bottom:10px">
           ✅ All holdings healthy — no exit or warning signals
         </div>
       `;
@@ -588,40 +591,29 @@ function renderRotationReview(review) {
 function buildRotationTable(reviews) {
   const rows = [];
 
-  reviews.forEach(review => {
-    const candidates = review.Candidates || [];
+  (reviews || []).forEach(review => {
+    // Phase 2B makes one allocation decision per portfolio position.
+    // Only the selected candidate is shown here; alternatives are not
+    // actionable recommendations and therefore should not create extra rows.
+    const candidate = review['Best Candidate'] && review['Best Candidate'] !== 'No candidate'
+      ? review['Best Candidate']
+      : null;
 
-    if (candidates.length === 0) {
-      rows.push({
-        existing: review['Existing Symbol'] || '—',
-        signal: review['Phase 2A Signal'] || '—',
-        outcome: review['Outcome'] || '—',
-        candidate: 'No candidate',
-        rank: '—',
-        candidateMomentum: '—',
-        existingMomentum: review['Existing Momentum'] ?? '—',
-        advantage: '—',
-        required: review['Required Advantage'] ?? '—',
-        recommendation: review['Recommendation'] || '—'
-      });
-      return;
-    }
+    const bestMomentum = review['Best Candidate Momentum'] ?? '—';
+    const existingMomentum = review['Existing Momentum'] ?? '—';
+    const advantage = review['Best Advantage'] ?? '—';
 
-    candidates.forEach(candidate => {
-      rows.push({
-        existing: review['Existing Symbol'] || '—',
-        signal: review['Phase 2A Signal'] || '—',
-        outcome: review['Outcome'] || '—',
-        candidate: candidate['Candidate'] || '—',
-        rank: candidate['Candidate Rank'] ?? '—',
-        candidateMomentum: candidate['Candidate Momentum'] ?? '—',
-        existingMomentum: candidate['Existing Momentum'] ?? '—',
-        advantage: candidate['Advantage'] ?? '—',
-        required: review['Required Advantage'] ?? '—',
-        assigned: review['Assigned Candidate'] &&
-          review['Assigned Candidate'] === (candidate['Candidate'] || ''),
-        recommendation: review['Recommendation'] || '—'
-      });
+    rows.push({
+      existing: review['Existing Symbol'] || '—',
+      signal: review['Phase 2A Signal'] || '—',
+      outcome: review['Outcome'] || '—',
+      candidate: candidate || 'No candidate',
+      rank: candidate ? (review['Best Candidate Rank'] ?? '—') : '—',
+      candidateMomentum: candidate ? bestMomentum : '—',
+      existingMomentum,
+      advantage,
+      required: review['Required Advantage'] ?? '—',
+      recommendation: review['Recommendation'] || '—'
     });
   });
 
@@ -629,7 +621,6 @@ function buildRotationTable(reviews) {
     <th>Existing</th>
     <th>Phase 2A</th>
     <th>Outcome</th>
-    <th>Assigned</th>
     <th>Candidate</th>
     <th>Rank</th>
     <th>Candidate Momentum</th>
@@ -669,7 +660,6 @@ function buildRotationTable(reviews) {
         <td><span class="sym">${r.existing}</span></td>
         <td>${r.signal}</td>
         <td class="${outcomeCls}">${r.outcome}</td>
-        <td>${r.assigned ? '✅' : ''}</td>
         <td><span class="sym">${r.candidate}</span></td>
         <td>${r.rank}</td>
         <td class="score">${r.candidateMomentum}</td>
