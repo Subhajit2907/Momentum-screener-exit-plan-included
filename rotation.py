@@ -26,6 +26,15 @@ def _num(value):
         return None
 
 
+def _rank(row):
+    """Read the main screener rank using the supported column aliases."""
+    for key in ("Rank", "rank", "#", "Top 10 Rank", "Top10 Rank"):
+        value = _num(row.get(key))
+        if value is not None:
+            return int(value) if value.is_integer() else value
+    return None
+
+
 def _symbol(row):
     return str(row.get("Symbol", row.get("symbol", ""))).strip().upper()
 
@@ -157,7 +166,7 @@ def prepare_candidates(passed_rows, held_symbols):
 
         # Only the main screener's Top-N picks enter the rotation pool.
         # This keeps candidate selection aligned with the primary strategy.
-        rank = _num(row.get("Rank"))
+        rank = _rank(row)
         if rank is None or rank > top_count:
             continue
 
@@ -167,7 +176,7 @@ def prepare_candidates(passed_rows, held_symbols):
 
     candidates.sort(
         key=lambda r: (
-            _num(r.get("Rank")) if _num(r.get("Rank")) is not None else 999,
+            _rank(r) if _rank(r) is not None else 999,
             -int(r.get("Momentum Strength", 0)),
             -(_num(r.get("Composite Score")) or 0),
             _symbol(r),
@@ -188,7 +197,7 @@ def rank_replacements(holding, candidates):
 
         ranked.append({
             "Candidate": _symbol(candidate),
-            "Candidate Rank": candidate.get("Rank", "—"),
+            "Candidate Rank": _rank(candidate) if _rank(candidate) is not None else "—",
             "Candidate Momentum": candidate_score,
             "Existing Momentum": existing_score,
             "Advantage": advantage,
@@ -197,10 +206,15 @@ def rank_replacements(holding, candidates):
             "Meets Advantage": advantage >= required,
         })
 
+    # IMPORTANT: candidate selection follows the MAIN SCREENER RANK.
+    # Momentum Advantage is only the qualification gate. Once a candidate
+    # clears that gate, the best-ranked (lowest Rank number) candidate wins.
+    # This is the agreed portfolio-rotation hierarchy.
     ranked.sort(
         key=lambda r: (
-            -int(r["Advantage"]),
+            _num(r["Candidate Rank"]) if _num(r["Candidate Rank"]) is not None else 999,
             -int(r["Candidate Momentum"]),
+            -int(r["Advantage"]),
             str(r["Candidate"]),
         )
     )
@@ -337,12 +351,14 @@ def build_rotation_review(passed_rows, exit_signals):
             "Outcome": outcome,
             "Recommendation": recommendation,
             "Best Candidate": best["Candidate"] if best else "No candidate",
+            "Best Candidate Rank": best["Candidate Rank"] if best else "—",
             "Best Candidate Momentum": (
                 best["Candidate Momentum"] if best else "—"
             ),
             "Best Advantage": best["Advantage"] if best else "—",
             "Candidate Allocated": bool(best),
-            "Candidates": ranked[:maximum],
+            "Candidates": [best] if best else [],
+            "Candidate Alternatives": ranked[1:maximum] if best else ranked[:maximum],
         })
 
     return {
